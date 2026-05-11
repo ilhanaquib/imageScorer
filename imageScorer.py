@@ -4,140 +4,241 @@ import numpy as np
 from PIL import Image
 import io
 
-
-# generate golden ratio mask using fibonacci and orient it
-def generate_fibonacci_mask(height, width, orientation):
+def generate_fibonacci_mask(height, width, orientation=0):
 
     mask = np.zeros((height, width), dtype=np.uint8)
 
-    x, y, w, h = 0, 0, width, height
+    fib = [1, 1]
+    for _ in range(10):
+        fib.append(fib[-1] + fib[-2])
+
+    scale = min(width, height) / fib[-1]
+    fib = [f * scale for f in fib]
+
     squares = []
 
-    i = 0
-    while True:
-        side = min(w, h)
-        if side < 1:
-            break
+    x, y = 0.0, 0.0
+    squares.append((x, y, fib[0]))
 
-        current_rect = [int(x), int(y), int(side), int(side)]
+    direction = 0
 
-        if i % 4 == 0:
-            x += side
-            w -= side
-        elif i % 4 == 1:
-            y += side
-            h -= side
-        elif i % 4 == 2:
-            current_rect[0] = int(x + w - side)
-            w -= side
-        elif i % 4 == 3:
-            current_rect[1] = int(y + h - side)
-            h -= side
+    min_x = max_x = 0
+    min_y = max_y = 0
 
-        squares.append({"rect": current_rect, "mode": i % 4})
-        i += 1
+    for i in range(1, len(fib)):
 
-        if i > 50:
-            break
+        s = fib[i]
 
-    for s in squares:
-        sx, sy, sw, sh = s["rect"]
+        prev_x, prev_y, prev_s = squares[-1]
 
-        thickness = 2 if sw > 20 else 1
+        if direction == 0:
+            x = prev_x + prev_s
+            y = prev_y
 
-        cv2.rectangle(mask, (sx, sy), (sx + sw, sy + sh), 255, 1)
+        elif direction == 1:
+            x = prev_x
+            y = prev_y + prev_s
 
-        if s["mode"] == 0:
-            center, angles = (sx + sw, sy + sh), (180, 270)
-        elif s["mode"] == 1:
-            center, angles = (sx, sy + sh), (270, 360)
-        elif s["mode"] == 2:
-            center, angles = (sx, sy), (0, 90)
-        elif s["mode"] == 3:
-            center, angles = (sx + sw, sy), (90, 180)
+        elif direction == 2:
+            x = prev_x - s
+            y = prev_y
 
-        cv2.ellipse(mask, center, (sw, sh), 0, angles[0], angles[1], 255, thickness)
+        else:
+            x = prev_x
+            y = prev_y - s
 
-    if orientation == 1:
-        mask = cv2.flip(mask, 1)
-    elif orientation == 2:
-        mask = cv2.flip(cv2.flip(mask, 1), 0)
-    elif orientation == 3:
-        mask = cv2.flip(mask, 0)
+        squares.append((x, y, s))
+
+        min_x = min(min_x, x)
+        min_y = min(min_y, y)
+
+        max_x = max(max_x, x + s)
+        max_y = max(max_y, y + s)
+
+        direction = (direction + 1) % 4
+
+    total_w = max_x - min_x
+    total_h = max_y - min_y
+
+    offset_x = (width - total_w) / 2 - min_x
+    offset_y = (height - total_h) / 2 - min_y
+
+    for i, (sx, sy, s) in enumerate(squares):
+
+        sx += offset_x
+        sy += offset_y
+
+        sx = int(round(sx))
+        sy = int(round(sy))
+        s = int(round(s))
+
+        cv2.rectangle(mask, (sx, sy), (sx + s, sy + s), 255, 1)
+
+        mode = i % 4
+
+        if mode == 0:
+            center = (sx + s, sy + s)
+            start, end = 180, 270
+
+        elif mode == 1:
+            center = (sx, sy + s)
+            start, end = 270, 360
+
+        elif mode == 2:
+            center = (sx, sy)
+            start, end = 0, 90
+
+        else:
+            center = (sx + s, sy)
+            start, end = 90, 180
+
+        cv2.ellipse(mask, center, (s, s), 0, start, end, 255, 2)
 
     return mask
 
-# uses edge detection to score the image
-def analyze_composition(uploaded_file):
 
-    FIXED_SENSITIVITY = 50
+def load_spiral_mask(height, width, orientation=0):
+
+    spiral = cv2.imread("golden_spiral.png", cv2.IMREAD_UNCHANGED)
+
+    if spiral is None:
+        raise FileNotFoundError("golden_spiral.png not found.")
+
+    spiral = cv2.resize(spiral, (width, height), interpolation=cv2.INTER_AREA)
+
+    # orientation handling
+    if orientation >= 4:
+        spiral = cv2.flip(spiral, 1)
+        orientation -= 4
+
+    if orientation == 1:
+        spiral = cv2.rotate(spiral, cv2.ROTATE_90_CLOCKWISE)
+    elif orientation == 2:
+        spiral = cv2.rotate(spiral, cv2.ROTATE_180)
+    elif orientation == 3:
+        spiral = cv2.rotate(spiral, cv2.ROTATE_90_COUNTERCLOCKWISE)
+
+    spiral = cv2.resize(spiral, (width, height), interpolation=cv2.INTER_AREA)
+
+    if spiral.shape[2] == 4:
+        mask = spiral[:, :, 3].astype(np.float32) / 255.0
+    else:
+        mask = cv2.cvtColor(spiral, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
+
+    return mask
+
+def analyze_composition(uploaded_file):
 
     file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
     img = cv2.imdecode(file_bytes, 1)
+
     img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
-    edges = cv2.Canny(gray, FIXED_SENSITIVITY, FIXED_SENSITIVITY * 2)
+    # edge detection
+    blur = cv2.GaussianBlur(gray, (5, 5), 0)
+    edges = cv2.Canny(blur, 25, 75)
+    edges = cv2.dilate(edges, np.ones((3, 3), np.uint8), iterations=1)
+
     h, w = gray.shape
 
-    best_score = 0
-    best_mask = np.zeros((h, w), dtype=np.uint8)
+    edge_points = np.where(edges > 0)
 
-    for i in range(4):
-        mask = generate_fibonacci_mask(h, w, i)
-        kernel = np.ones((5, 5), np.uint8)
-        dilated_mask = cv2.dilate(mask, kernel, iterations=1)
-        overlap = cv2.bitwise_and(edges, dilated_mask)
+    if len(edge_points[0]) == 0:
+        return img_rgb, 0.00
 
-        actual_hits = np.count_nonzero(overlap)
-        potential_hits = np.count_nonzero(mask)
-        score = (actual_hits / potential_hits) * 100 if potential_hits > 0 else 0
+    y_coords, x_coords = edge_points
+
+    best_score = -1
+    best_mask = None
+
+    for i in range(8):
+
+        mask = load_spiral_mask(h, w, i)
+
+        valid = (
+            (y_coords >= 0) & (y_coords < mask.shape[0]) &
+            (x_coords >= 0) & (x_coords < mask.shape[1])
+        )
+
+        values = mask[y_coords[valid], x_coords[valid]]
+
+        if len(values) > 0:
+            raw = float(np.mean(values))
+
+            score = np.sqrt(raw ** 0.35) * 100
+            score = np.clip(score, 0, 100)
+        else:
+            score = 0
 
         if score > best_score:
             best_score = score
             best_mask = mask
 
-    overlay_img = img_rgb.copy()
-    overlay_img[best_mask > 0] = [255, 215, 0]
-    return overlay_img, min(round(best_score, 2), 100.0)
+    overlay = img_rgb.copy()
 
+    if best_mask is not None:
+        highlight = best_mask > 0.3
+        gold = np.array([255, 215, 0], dtype=np.uint8)
 
-# --- Streamlit UI ---
+        overlay[highlight] = (
+            0.6 * overlay[highlight] + 0.4 * gold
+        ).astype(np.uint8)
+
+    return overlay, round(float(best_score), 2)
+
 st.set_page_config(page_title="IsThisFiboYet", layout="wide")
+
 st.title("Check if your photo follows the golden ratio composition!")
 
 with st.sidebar:
     st.header("Upload")
+
     uploaded_files = st.file_uploader(
-        "Upload Photos", type=["jpg", "jpeg", "png"], accept_multiple_files=True
+        "Upload Photos",
+        type=["jpg", "jpeg", "png"],
+        accept_multiple_files=True
     )
 
 if uploaded_files:
+
     results = []
+
     for uploaded_file in uploaded_files:
+
         with st.spinner(f"Analyzing {uploaded_file.name}..."):
+
             uploaded_file.seek(0)
             overlay, score = analyze_composition(uploaded_file)
-            results.append(
-                {"name": uploaded_file.name, "image": overlay, "score": score}
-            )
+
+            results.append({
+                "name": uploaded_file.name,
+                "image": overlay,
+                "score": score
+            })
 
     results.sort(key=lambda x: x["score"], reverse=True)
 
     st.subheader("Winner")
+
     st.image(
         results[0]["image"],
         use_container_width=True,
-        caption=f"Score: {results[0]['score']}%",
+        caption=f"Score: {results[0]['score']}%"
     )
 
     st.divider()
+
     cols = st.columns(3)
+
     for idx, res in enumerate(results):
+
         with cols[idx % 3]:
+
             st.image(
                 res["image"],
                 use_container_width=True,
-                caption=f"{res['name']} - {res['score']}%",
+                caption=f"{res['name']} - {res['score']}%"
             )
-            st.progress(res["score"] / 100)
+
+            st.progress(float(res["score"]) / 100)
